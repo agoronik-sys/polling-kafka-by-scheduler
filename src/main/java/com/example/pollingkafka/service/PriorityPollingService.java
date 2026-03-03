@@ -2,6 +2,9 @@ package com.example.pollingkafka.service;
 
 import com.example.pollingkafka.config.ProcessingProperties;
 import com.example.pollingkafka.config.ProcessingProperties.SystemConfig;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -15,6 +18,7 @@ import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Сервис, который читает сообщения из Kafka не через {@code @KafkaListener},
@@ -37,6 +41,7 @@ public class PriorityPollingService {
     private final ProcessingProperties properties;
     private final TopicNameResolver topicNameResolver;
     private final TaskScheduler taskScheduler;
+    private final MeterRegistry meterRegistry;
 
     /**
      * Быстрые (quick) consumer-ы на каждую систему.
@@ -48,14 +53,27 @@ public class PriorityPollingService {
      */
     private final Map<String, KafkaConsumer<String, String>> slowConsumersBySystem = new ConcurrentHashMap<>();
 
+    /**
+     * Счётчики обработанных сообщений (для Prometheus) по системе и приоритету.
+     */
+    private final Map<String, Counter> quickCountersBySystem = new ConcurrentHashMap<>();
+    private final Map<String, Counter> slowCountersBySystem = new ConcurrentHashMap<>();
+
+    /**
+     * Gauge: сколько сообщений было обработано за последний тик для каждой системы.
+     */
+    private final Map<String, AtomicInteger> lastProcessedPerSystem = new ConcurrentHashMap<>();
+
     public PriorityPollingService(ConsumerFactory<String, String> consumerFactory,
                                   ProcessingProperties properties,
                                   TopicNameResolver topicNameResolver,
-                                  TaskScheduler taskScheduler) {
+                                  TaskScheduler taskScheduler,
+                                  MeterRegistry meterRegistry) {
         this.consumerFactory = consumerFactory;
         this.properties = properties;
         this.topicNameResolver = topicNameResolver;
         this.taskScheduler = taskScheduler;
+        this.meterRegistry = meterRegistry;
     }
 
     @PostConstruct
@@ -107,6 +125,35 @@ public class PriorityPollingService {
 
             log.info("Initialized Kafka consumers for system {} quickTopic={} slowTopic={}",
                     systemId, quickTopic, slowTopic);
+
+            // Метрики: конфигурированный RPS на систему
+            Gauge.builder("processing_system_rps_configured", system, SystemConfig::getRps)
+                    .description("Configured max messages per scheduler tick (RPS) for system")
+                    .tag("system", systemId)
+                    .register(meterRegistry);
+
+            // Метрики: сколько обработано в последний тик
+            AtomicInteger lastProcessed = new AtomicInteger(0);
+            lastProcessedPerSystem.put(systemId, lastProcessed);
+            Gauge.builder("processing_system_last_tick_processed", lastProcessed, AtomicInteger::get)
+                    .description("Number of messages processed in last scheduler tick for system")
+                    .tag("system", systemId)
+                    .register(meterRegistry);
+
+            // Счётчики: сколько всего обработано сообщений по системе и приоритету
+            Counter quickCounter = Counter.builder("processing_system_messages_total")
+                    .description("Total messages processed by scheduler per system and priority")
+                    .tag("system", systemId)
+                    .tag("priority", "quick")
+                    .register(meterRegistry);
+            Counter slowCounter = Counter.builder("processing_system_messages_total")
+                    .description("Total messages processed by scheduler per system and priority")
+                    .tag("system", systemId)
+                    .tag("priority", "slow")
+                    .register(meterRegistry);
+
+            quickCountersBySystem.put(systemId, quickCounter);
+            slowCountersBySystem.put(systemId, slowCounter);
         }
     }
 
@@ -164,6 +211,10 @@ public class PriorityPollingService {
                 break;
             }
             handleRecord(system, record, true);
+            Counter quickCounter = quickCountersBySystem.get(system.getId());
+            if (quickCounter != null) {
+                quickCounter.increment();
+            }
             processed++;
         }
 
@@ -176,8 +227,17 @@ public class PriorityPollingService {
                     break;
                 }
                 handleRecord(system, record, false);
+                Counter slowCounter = slowCountersBySystem.get(system.getId());
+                if (slowCounter != null) {
+                    slowCounter.increment();
+                }
                 processed++;
             }
+        }
+
+        AtomicInteger lastProcessed = lastProcessedPerSystem.get(system.getId());
+        if (lastProcessed != null) {
+            lastProcessed.set(processed);
         }
 
         log.debug("System {} processed {} messages in this tick (capacity={})",

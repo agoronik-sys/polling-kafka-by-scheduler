@@ -20,8 +20,13 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      # Два листенера:
+      # - PLAINTEXT: для клиентов с хоста (localhost:9092)
+      # - PLAINTEXT_INTERNAL: для внутренних контейнеров (kafka:29092)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -33,21 +38,17 @@ services:
     depends_on:
       - kafka
     entrypoint: >
-      bash -c "
-      echo 'Waiting for Kafka...';
-      cub kafka-ready -b kafka:9092 1 20 &&
-      # Общий входной топик
-      kafka-topics --create --if-not-exists --topic processing-all --partitions 4 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      # Системные топики (по 3 партиции каждый)
-      kafka-topics --create --if-not-exists --topic processing-all.system-a-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-a-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-b-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-b-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-c-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-c-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-d-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      kafka-topics --create --if-not-exists --topic processing-all.system-d-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
-      echo 'All topics for processing-all are ready';
-      sleep 5
-      "
+      bash -c 'echo "Waiting for Kafka...";
+      cub kafka-ready -b kafka:29092 1 20 &&
+      kafka-topics --create --if-not-exists --topic processing-all --partitions 4 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-a-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-a-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-b-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-b-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-c-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-c-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-d-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-d-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:29092 &&
+      echo "All topics for processing-all are ready";
+      sleep 5'
 

@@ -1,5 +1,6 @@
 spring:
   kafka:
+    # При запуске приложения на хост-машине Kafka доступна по localhost:9092 (порт проброшен из контейнера).
     bootstrap-servers: localhost:9092
     consumer:
       # Базовый group-id, будет переопределён для каждой системы в сервисе
@@ -26,9 +27,9 @@ processing:
     priority: X-Priority
   systems:
     - id: SYSTEM_A
-      rps: 10
+      rps: 7
     - id: SYSTEM_B
-      rps: 20
+      rps: 15
     - id: SYSTEM_C
       rps: 5
     - id: SYSTEM_D
@@ -38,5 +39,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
-
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
