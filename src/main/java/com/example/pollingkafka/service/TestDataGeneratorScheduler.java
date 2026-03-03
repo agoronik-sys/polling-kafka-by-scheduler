@@ -50,13 +50,13 @@ public class TestDataGeneratorScheduler {
      * с разными systemCode и приоритетом (quick / slow)
      * и отправляем их в входной топик.
      */
-    @Scheduled(fixedRateString = "60000")
+    @Scheduled(fixedRateString = "10000")
     public void generateTestMessages() {
         if (systemCodes.isEmpty()) {
             return;
         }
 
-        int count = ThreadLocalRandom.current().nextInt(1, 51);
+        int count = ThreadLocalRandom.current().nextInt(50, 100);
         String topic = processingProperties.getIncomingTopic();
         String priorityHeaderName = processingProperties.getHeaders().getPriority();
         String quickValue = processingProperties.getHighPriorityValue(); // обычно "quick"
