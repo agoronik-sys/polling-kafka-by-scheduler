@@ -1,0 +1,42 @@
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      # Базовый group-id, будет переопределён для каждой системы в сервисе
+      group-id: processing-base
+      auto-offset-reset: latest
+      enable-auto-commit: true
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        max.poll.records: 1000
+
+processing:
+  # Входной общий топик для IncomingRoutingListener
+  incoming-topic: processing-all
+  # Общая consumer group для всех инстансов сервиса, читающих processing-all
+  incoming-group-id: b-listen-all
+  # Базовое имя для системных топиков (processing-all.system-a-quick и т.п.)
+  base-topic: processing-all
+  poll-interval-ms: 1000
+  # Значение заголовка X-Priority, которое считается "быстрым" (приоритетным)
+  high-priority-value: quick
+  headers:
+    system-id: X-System-Id
+    priority: X-Priority
+  systems:
+    - id: SYSTEM_A
+      rps: 10
+    - id: SYSTEM_B
+      rps: 20
+    - id: SYSTEM_C
+      rps: 5
+    - id: SYSTEM_D
+      rps: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+

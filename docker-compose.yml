@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zk
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    entrypoint: >
+      bash -c "
+      echo 'Waiting for Kafka...';
+      cub kafka-ready -b kafka:9092 1 20 &&
+      # Общий входной топик
+      kafka-topics --create --if-not-exists --topic processing-all --partitions 4 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      # Системные топики (по 3 партиции каждый)
+      kafka-topics --create --if-not-exists --topic processing-all.system-a-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-a-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-b-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-b-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-c-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-c-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-d-quick --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      kafka-topics --create --if-not-exists --topic processing-all.system-d-slow  --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092 &&
+      echo 'All topics for processing-all are ready';
+      sleep 5
+      "
+
