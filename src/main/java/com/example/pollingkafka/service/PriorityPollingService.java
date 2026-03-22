@@ -8,6 +8,8 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
@@ -16,7 +18,11 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -31,6 +37,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *     <li>сначала обрабатываем сообщения с высоким приоритетом;</li>
  *     <li>если лимит RPS ещё не выбран — добираем сообщения с низким приоритетом.</li>
  * </ul>
+ * <p>
+ * Офсеты: {@code enable.auto.commit=false}. После quick/slow {@code poll}: один раз в конце батча —
+ * {@link KafkaConsumer#commitSync(java.util.Map)} только по <b>непрерывному префиксу</b> обработанных offset’ов
+ * (с минимального offset’а в батче по партиции) и {@code seek} к первому необработанному — иначе хвост батча теряется.
  */
 @Service
 public class PriorityPollingService {
@@ -182,66 +192,144 @@ public class PriorityPollingService {
         }
     }
 
-    /**
-     * Чтение и обработка сообщений для одной конкретной системы с учётом её RPS.
-     *
-     * @param system конфигурация системы (id и RPS)
-     */
     private void pollAndProcessForSystem(SystemConfig system) {
-        KafkaConsumer<String, String> quickConsumer = quickConsumersBySystem.get(system.getId());
-        KafkaConsumer<String, String> slowConsumer = slowConsumersBySystem.get(system.getId());
+
+        KafkaConsumer<String, String> quickConsumer =
+                quickConsumersBySystem.get(system.getId());
+
+        KafkaConsumer<String, String> slowConsumer =
+                slowConsumersBySystem.get(system.getId());
 
         if (quickConsumer == null || slowConsumer == null) {
             return;
         }
-        // Максимальное количество сообщений, которое можно обработать за один тик шедуллера
-        // для данной системы (по сути "RPS" в рамках интервала poll-interval-ms).
+
         int capacity = system.getRps();
         if (capacity <= 0) {
             return;
         }
 
-        // Счётчик, сколько сообщений уже обработано в рамках текущего тика для системы.
         int processed = 0;
 
-        // Сначала выбираем сообщения с высоким приоритетом, пока не исчерпан лимит RPS.
-        ConsumerRecords<String, String> quickRecords = quickConsumer.poll(Duration.ofMillis(100));
+        // ---------- QUICK ----------
+
+        ConsumerRecords<String, String> quickRecords =
+                quickConsumer.poll(Duration.ofMillis(100));
+
+        Map<TopicPartition, Set<Long>> quickProcessed = new HashMap<>();
         for (ConsumerRecord<String, String> record : quickRecords) {
             if (processed >= capacity) {
                 break;
             }
-            handleRecord(system, record, true);
-            Counter quickCounter = quickCountersBySystem.get(system.getId());
-            if (quickCounter != null) {
-                quickCounter.increment();
+            if (!handleRecordSafe(system, record, true)) {
+                break;
+            }
+            TopicPartition tp = new TopicPartition(record.topic(), record.partition());
+            quickProcessed.computeIfAbsent(tp, k -> new HashSet<>()).add(record.offset());
+            Counter qc = quickCountersBySystem.get(system.getId());
+            if (qc != null) {
+                qc.increment();
             }
             processed++;
         }
+        commitAfterPartialBatch(quickConsumer, quickRecords, quickProcessed);
 
-        // Если после high-priority ещё остался запас по RPS,
-        // добираем его сообщениями с низким приоритетом из отдельного топика.
+        // ---------- SLOW ----------
+
         if (processed < capacity) {
-            ConsumerRecords<String, String> slowRecords = slowConsumer.poll(Duration.ofMillis(100));
+            ConsumerRecords<String, String> slowRecords =
+                    slowConsumer.poll(Duration.ofMillis(100));
+
+            Map<TopicPartition, Set<Long>> slowProcessed = new HashMap<>();
             for (ConsumerRecord<String, String> record : slowRecords) {
                 if (processed >= capacity) {
                     break;
                 }
-                handleRecord(system, record, false);
-                Counter slowCounter = slowCountersBySystem.get(system.getId());
-                if (slowCounter != null) {
-                    slowCounter.increment();
+                if (!handleRecordSafe(system, record, false)) {
+                    break;
+                }
+                TopicPartition tp = new TopicPartition(record.topic(), record.partition());
+                slowProcessed.computeIfAbsent(tp, k -> new HashSet<>()).add(record.offset());
+                Counter sc = slowCountersBySystem.get(system.getId());
+                if (sc != null) {
+                    sc.increment();
                 }
                 processed++;
             }
+            commitAfterPartialBatch(slowConsumer, slowRecords, slowProcessed);
         }
 
-        AtomicInteger lastProcessed = lastProcessedPerSystem.get(system.getId());
+        AtomicInteger lastProcessed =
+                lastProcessedPerSystem.get(system.getId());
+
         if (lastProcessed != null) {
             lastProcessed.set(processed);
         }
+    }
 
-        log.debug("System {} processed {} messages in this tick (capacity={})",
-                system.getId(), processed, capacity);
+    /**
+     * Один коммит на батч: только непрерывный префикс обработанных offset’ов с начала батча по партиции;
+     * затем {@code seek} на первый необработанный в батче (позиция после {@code poll} уже за хвостом).
+     */
+    private void commitAfterPartialBatch(KafkaConsumer<String, String> consumer,
+                                         ConsumerRecords<String, String> records,
+                                         Map<TopicPartition, Set<Long>> processedOffsets) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Map<TopicPartition, OffsetAndMetadata> commits = new HashMap<>();
+        for (TopicPartition tp : records.partitions()) {
+            var partRecords = records.records(tp);
+            if (partRecords == null || partRecords.isEmpty()) {
+                continue;
+            }
+            TreeSet<Long> batchOffsets = new TreeSet<>();
+            for (ConsumerRecord<String, String> r : partRecords) {
+                batchOffsets.add(r.offset());
+            }
+            Set<Long> proc = processedOffsets.getOrDefault(tp, Set.of());
+
+            long first = batchOffsets.first();
+            long last = batchOffsets.last();
+            long nextCommitExclusive = first;
+            for (long o = first; o <= last; o++) {
+                if (!batchOffsets.contains(o)) {
+                    break;
+                }
+                if (!proc.contains(o)) {
+                    break;
+                }
+                nextCommitExclusive = o + 1;
+            }
+            if (nextCommitExclusive > first) {
+                commits.put(tp, new OffsetAndMetadata(nextCommitExclusive));
+            }
+            for (long o : batchOffsets) {
+                if (!proc.contains(o)) {
+                    consumer.seek(tp, o);
+                    break;
+                }
+            }
+        }
+        if (!commits.isEmpty()) {
+            try {
+                consumer.commitSync(commits);
+            } catch (Exception ex) {
+                log.error("commitSync failed after poll batch", ex);
+            }
+        }
+    }
+
+    private boolean handleRecordSafe(SystemConfig system,
+                                     ConsumerRecord<String, String> record,
+                                     boolean highPriority) {
+        try {
+            handleRecord(system, record, highPriority);
+            return true;
+        } catch (Exception ex) {
+            log.error("handleRecord failed system={} offset={}", system.getId(), record.offset(), ex);
+            return false;
+        }
     }
 
     private void handleRecord(SystemConfig system,

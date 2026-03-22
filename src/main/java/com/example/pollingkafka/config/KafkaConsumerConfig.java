@@ -29,8 +29,8 @@ public class KafkaConsumerConfig {
         Map<String, Object> props = kafkaProperties.buildConsumerProperties(null);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        // Управляем коммитами вручную при необходимости
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+        // Ручной commitSync в PriorityPollingService; иначе auto-commit + commitSync дают гонки и «перепрыгивание» offset’ов
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         // Ограничим количество сообщений за один poll (будет переопределено из application.yml при желании)
         props.putIfAbsent(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 20);
         return new DefaultKafkaConsumerFactory<>(props);
